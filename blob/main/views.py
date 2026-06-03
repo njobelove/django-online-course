@@ -1,13 +1,21 @@
 from django.shortcuts import render, get_object_or_404, redirect
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
-from .models import Question, Choice, Submission
-from django.utils import timezone
+from .models import Question, Choice, Submission, Enrollment, Course
 
-def submit(request, question_id):
+@login_required
+def submit(request, course_id, question_id):
     """Handle question submission and save user's answer"""
+    course = get_object_or_404(Course, id=course_id)
+    question = get_object_or_404(Question, id=question_id)
+    
+    # Get or create enrollment
+    enrollment, created = Enrollment.objects.get_or_create(
+        user=request.user,
+        course=course
+    )
+    
     if request.method == 'POST':
-        question = get_object_or_404(Question, id=question_id)
         selected_choice_id = request.POST.get('choice')
         
         if selected_choice_id:
@@ -15,7 +23,7 @@ def submit(request, question_id):
             
             # Check if user already submitted this question
             submission, created = Submission.objects.get_or_create(
-                user=request.user,
+                enrollment=enrollment,
                 question=question,
                 defaults={'selected_choice': selected_choice}
             )
@@ -31,47 +39,41 @@ def submit(request, question_id):
             messages.success(request, "Your answer has been submitted!")
         else:
             messages.error(request, "Please select an answer.")
-        
-        return redirect('exam')
+    
+    # Redirect to exam results
+    return redirect('show_exam_result', course_id=course.id)
 
-def show_exam_result(request):
+@login_required
+def show_exam_result(request, course_id):
     """Display exam results with score and congratulations message"""
-    if not request.user.is_authenticated:
-        return redirect('login')
+    course = get_object_or_404(Course, id=course_id)
     
-    # Get all submissions for the user
-    submissions = Submission.objects.filter(user=request.user)
+    # Get enrollment
+    try:
+        enrollment = Enrollment.objects.get(user=request.user, course=course)
+    except Enrollment.DoesNotExist:
+        messages.error(request, "You are not enrolled in this course.")
+        return redirect('course_list')
     
-    # Calculate score
+    # Get all submissions for this enrollment
+    submissions = Submission.objects.filter(enrollment=enrollment)
+    
+    # Calculate scores
     total_questions = Question.objects.count()
-    correct_answers = submissions.filter(is_correct=True).count()
+    total_score = sum([sub.is_get_score() for sub in submissions])
+    possible_score = total_questions
     
-    if total_questions > 0:
-        score_percentage = (correct_answers / total_questions) * 100
-    else:
-        score_percentage = 0
-    
-    # Determine if passed (e.g., 70% or higher)
+    score_percentage = (total_score / possible_score * 100) if possible_score > 0 else 0
     passed = score_percentage >= 70
     
     context = {
+        'course': course,
         'submissions': submissions,
-        'total_questions': total_questions,
-        'correct_answers': correct_answers,
+        'total_score': total_score,
+        'possible_score': possible_score,
         'score_percentage': round(score_percentage, 2),
         'passed': passed,
         'congratulations': passed,
     }
     
     return render(request, 'exam_result.html', context)
-
-def exam_view(request):
-    """Display all questions for the exam"""
-    questions = Question.objects.all()
-    user_submissions = {sub.question_id: sub for sub in Submission.objects.filter(user=request.user)}
-    
-    context = {
-        'questions': questions,
-        'user_submissions': user_submissions,
-    }
-    return render(request, 'exam.html', context)
